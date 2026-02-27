@@ -41,13 +41,18 @@ target_include_directories(ImGui PUBLIC
 )
 target_link_libraries(ImGui PUBLIC SDL2::SDL2)
 
-# Lua - Scripting language
+# Lua - Scripting language (built from source so it works on all platforms)
 set(LUA_DIR ${CMAKE_CURRENT_SOURCE_DIR}/lua-5.4.6)
-add_library(lua STATIC IMPORTED GLOBAL)
-set_target_properties(lua PROPERTIES
-    IMPORTED_LOCATION ${LUA_DIR}/src/liblua.a
+file(GLOB LUA_SOURCES ${LUA_DIR}/src/*.c)
+# Exclude the Lua standalone interpreter and compiler (they have their own main())
+list(FILTER LUA_SOURCES EXCLUDE REGEX ".*(lua|luac)\\.c$")
+add_library(lua STATIC ${LUA_SOURCES})
+target_include_directories(lua PUBLIC ${LUA_DIR}/src)
+# Suppress warnings from Lua source
+target_compile_options(lua PRIVATE
+    $<$<C_COMPILER_ID:GNU,Clang>:-w>
+    $<$<C_COMPILER_ID:MSVC>:/w>
 )
-target_include_directories(lua INTERFACE ${LUA_DIR}/src)
 
 # sol2 - C++ Lua binding (header-only)
 add_library(sol2 INTERFACE)
