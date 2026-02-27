@@ -157,7 +157,7 @@ jobs:
           Priority: optional
           Architecture: amd64
           Installed-Size: ${KB}
-          Maintainer: Gillian
+          Maintainer: Hope
           Description: Mweru - Game Engine
            A beginner-friendly 2D game engine for creating games and visual novels.
           EOF

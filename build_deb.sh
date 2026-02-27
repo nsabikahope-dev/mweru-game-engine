@@ -11,7 +11,7 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 VERSION="1.0.0"
-MAINTAINER="Gillian <your@email.com>"
+MAINTAINER="Hope <nsabikahope-dev@users.noreply.github.com>"
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
