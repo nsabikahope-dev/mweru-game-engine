@@ -1,0 +1,303 @@
+name: Build & Release
+
+# Runs automatically when you create a new version tag like v1.0.0
+# You can also trigger it manually from the GitHub website
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:  # allows clicking "Run workflow" on GitHub
+
+jobs:
+  # ============================================================
+  # LINUX — builds the .deb installer
+  # ============================================================
+  build-linux:
+    name: Linux (Ubuntu) — .deb installer
+    runs-on: ubuntu-22.04
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y \
+            cmake build-essential \
+            libsdl2-dev \
+            libopenal-dev \
+            libsndfile1-dev \
+            libglm-dev \
+            lua5.4 liblua5.4-dev \
+            patchelf
+
+      - name: Build Release binaries
+        run: |
+          cmake -S . -B build-release -DCMAKE_BUILD_TYPE=Release
+          cmake --build build-release --target Editor --target Runtime --parallel $(nproc)
+
+      - name: Download appimagetool
+        run: |
+          curl -fsSL https://github.com/AppImage/AppImageKit/releases/download/continuous/appimagetool-x86_64.AppImage \
+            -o /tmp/appimagetool
+          chmod +x /tmp/appimagetool
+          # Extract so it runs without FUSE
+          cd /tmp && ./appimagetool --appimage-extract
+          echo "appimagetool ready"
+
+      - name: Build AppImage
+        run: |
+          APPDIR=/tmp/MweruGameEngine.AppDir
+          mkdir -p "$APPDIR/usr/bin" "$APPDIR/usr/lib" \
+                   "$APPDIR/usr/share/icons/hicolor/256x256/apps" \
+                   "$APPDIR/usr/share/applications" "$APPDIR/assets"
+
+          cp build-release/bin/Editor  "$APPDIR/usr/bin/MweruGameEngine-Editor"
+          cp build-release/bin/Runtime "$APPDIR/usr/bin/MweruGameEngine-Runtime"
+          cp -r assets/. "$APPDIR/assets/"
+
+          # Bundle non-system shared libraries
+          for bin in "$APPDIR/usr/bin/"*; do
+            ldd "$bin" | awk '{print $3}' | grep "^/" | while read lib; do
+              name=$(basename "$lib")
+              echo "$name" | grep -qE "libc\.so|libm\.so|libstdc\+\+|libgcc_s|ld-linux" && continue
+              [ -f "$APPDIR/usr/lib/$name" ] || cp "$lib" "$APPDIR/usr/lib/$name"
+            done
+          done
+
+          # Generate a simple icon
+          python3 - << 'PYEOF'
+          import struct, zlib
+          def make_png(fn, W, H, pixels):
+              def chunk(n, d):
+                  c = n+d; return struct.pack('>I',len(d))+c+struct.pack('>I',zlib.crc32(c)&0xFFFFFFFF)
+              sig = b'\x89PNG\r\n\x1a\n'
+              ihdr = chunk(b'IHDR', struct.pack('>IIBBBBB',W,H,8,2,0,0,0))
+              raw = b''.join(b'\x00'+bytes([p for px in pixels[r*W:(r+1)*W] for p in px]) for r in range(H))
+              with open(fn,'wb') as f: f.write(sig+ihdr+chunk(b'IDAT',zlib.compress(raw))+chunk(b'IEND',b''))
+          W=H=256; cx=cy=128
+          px=[(100,80,220) if 90<((x-cx)**2+(y-cy)**2)**0.5<110 else (50,50,80) if ((x-cx)**2+(y-cy)**2)**0.5<70 else (30,30,50) for y in range(H) for x in range(W)]
+          make_png('/tmp/MweruGameEngine.AppDir/MweruGameEngine.png',W,H,px)
+          make_png('/tmp/MweruGameEngine.AppDir/usr/share/icons/hicolor/256x256/apps/MweruGameEngine.png',W,H,px)
+          PYEOF
+
+          # AppRun launcher
+          cat > "$APPDIR/AppRun" << 'APPRUN'
+          #!/usr/bin/env bash
+          HERE="$(dirname "$(readlink -f "$0")")"
+          export LD_LIBRARY_PATH="$HERE/usr/lib:${LD_LIBRARY_PATH:-}"
+          cd "$HERE"
+          if [[ "$1" == *.scene ]]; then
+            exec "$HERE/usr/bin/MweruGameEngine-Runtime" "$@"
+          else
+            exec "$HERE/usr/bin/MweruGameEngine-Editor" "$@"
+          fi
+          APPRUN
+          chmod +x "$APPDIR/AppRun"
+
+          cat > "$APPDIR/MweruGameEngine.desktop" << 'DESKTOP'
+          [Desktop Entry]
+          Name=Mweru - Game Engine
+          Comment=Create 2D games and visual novels
+          Exec=MweruGameEngine-Editor
+          Icon=MweruGameEngine
+          Type=Application
+          Categories=Development;Game;
+          DESKTOP
+
+          ARCH=x86_64 /tmp/squashfs-root/AppRun --comp gzip \
+            "$APPDIR" Mweru-GameEngine-linux-x86_64.AppImage
+
+      - name: Build .deb package
+        run: |
+          DEB_ROOT=/tmp/mweru-deb
+          mkdir -p "$DEB_ROOT/DEBIAN" \
+                   "$DEB_ROOT/opt/MweruGameEngine" \
+                   "$DEB_ROOT/usr/bin" \
+                   "$DEB_ROOT/usr/share/applications" \
+                   "$DEB_ROOT/usr/share/icons/hicolor/256x256/apps"
+
+          cp Mweru-GameEngine-linux-x86_64.AppImage "$DEB_ROOT/opt/MweruGameEngine/MweruGameEngine"
+          chmod +x "$DEB_ROOT/opt/MweruGameEngine/MweruGameEngine"
+          ln -s /opt/MweruGameEngine/MweruGameEngine "$DEB_ROOT/usr/bin/MweruGameEngine"
+          cp /tmp/MweruGameEngine.AppDir/MweruGameEngine.png \
+             "$DEB_ROOT/usr/share/icons/hicolor/256x256/apps/"
+
+          cat > "$DEB_ROOT/usr/share/applications/MweruGameEngine.desktop" << 'DESKTOP'
+          [Desktop Entry]
+          Name=Mweru - Game Engine
+          Comment=Create 2D games and visual novels — no coding required
+          Exec=/opt/MweruGameEngine/MweruGameEngine
+          Icon=MweruGameEngine
+          Type=Application
+          Categories=Development;Game;
+          DESKTOP
+
+          VERSION="${GITHUB_REF_NAME#v}"
+          KB=$(du -sk "$DEB_ROOT/opt" "$DEB_ROOT/usr" | awk '{sum+=$1}END{print sum}')
+          cat > "$DEB_ROOT/DEBIAN/control" << EOF
+          Package: mweru-game-engine
+          Version: $VERSION
+          Section: games
+          Priority: optional
+          Architecture: amd64
+          Installed-Size: $KB
+          Maintainer: Gillian
+          Description: Mweru - Game Engine
+           A beginner-friendly 2D game engine for creating games and visual novels.
+          EOF
+
+          printf '#!/bin/sh\nset -e\nchmod +x /opt/MweruGameEngine/MweruGameEngine 2>/dev/null||true\ngtk-update-icon-cache /usr/share/icons/hicolor/ 2>/dev/null||true\nupdate-desktop-database /usr/share/applications/ 2>/dev/null||true\nexit 0\n' > "$DEB_ROOT/DEBIAN/postinst"
+          chmod 755 "$DEB_ROOT/DEBIAN/postinst"
+          printf '#!/bin/sh\nexit 0\n' > "$DEB_ROOT/DEBIAN/prerm"
+          chmod 755 "$DEB_ROOT/DEBIAN/prerm"
+
+          dpkg-deb --build --root-owner-group "$DEB_ROOT" \
+            "Mweru-GameEngine-${VERSION}-linux-amd64.deb"
+
+      - name: Upload Linux artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-release
+          path: |
+            Mweru-GameEngine-*.deb
+            Mweru-GameEngine-*.AppImage
+
+  # ============================================================
+  # WINDOWS — builds the .exe installer
+  # ============================================================
+  build-windows:
+    name: Windows — .exe installer
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout source code
+        uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Install dependencies with vcpkg
+        run: |
+          vcpkg install sdl2:x64-windows openal-soft:x64-windows libsndfile:x64-windows glm:x64-windows lua:x64-windows
+          vcpkg integrate install
+
+      - name: Build Release binaries
+        run: |
+          cmake -S . -B build-release `
+            -DCMAKE_BUILD_TYPE=Release `
+            -DCMAKE_TOOLCHAIN_FILE="$env:VCPKG_ROOT/scripts/buildsystems/vcpkg.cmake"
+          cmake --build build-release --config Release --target Editor --target Runtime
+
+      - name: Install NSIS (installer builder)
+        run: choco install nsis -y
+
+      - name: Collect runtime DLLs
+        run: |
+          $vcpkg = "$env:VCPKG_ROOT\installed\x64-windows\bin"
+          $dest  = "windows-dist"
+          New-Item -ItemType Directory -Force $dest | Out-Null
+          Copy-Item "build-release\bin\Release\Editor.exe"  "$dest\MweruGameEngine.exe"
+          Copy-Item "build-release\bin\Release\Runtime.exe" "$dest\MweruGameEngine-Runtime.exe"
+          # Copy all SDL2/OpenAL/etc DLLs
+          Get-ChildItem "$vcpkg\*.dll" | Copy-Item -Destination $dest
+          # Copy assets
+          Copy-Item -Recurse assets "$dest\assets"
+
+      - name: Create NSIS installer script
+        shell: bash
+        run: |
+          VERSION="${GITHUB_REF_NAME#v}"
+          cat > installer.nsi << NSIS
+          !define APP_NAME "Mweru - Game Engine"
+          !define APP_VERSION "$VERSION"
+          !define INSTALL_DIR "\$PROGRAMFILES64\MweruGameEngine"
+
+          Name "\${APP_NAME}"
+          OutFile "Mweru-GameEngine-\${APP_VERSION}-windows-setup.exe"
+          InstallDir "\${INSTALL_DIR}"
+          InstallDirRegKey HKLM "Software\MweruGameEngine" "Install_Dir"
+          RequestExecutionLevel admin
+          SetCompressor lzma
+
+          Page directory
+          Page instfiles
+
+          Section "Install"
+            SetOutPath "\$INSTDIR"
+            File /r "windows-dist\*.*"
+
+            ; Desktop shortcut
+            CreateShortCut "\$DESKTOP\Mweru - Game Engine.lnk" "\$INSTDIR\MweruGameEngine.exe"
+
+            ; Start menu shortcut
+            CreateDirectory "\$SMPROGRAMS\Mweru Game Engine"
+            CreateShortCut "\$SMPROGRAMS\Mweru Game Engine\Mweru - Game Engine.lnk" "\$INSTDIR\MweruGameEngine.exe"
+            CreateShortCut "\$SMPROGRAMS\Mweru Game Engine\Uninstall.lnk" "\$INSTDIR\uninstall.exe"
+
+            ; Registry entry for Add/Remove Programs
+            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\MweruGameEngine" \
+              "DisplayName" "Mweru - Game Engine"
+            WriteRegStr HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\MweruGameEngine" \
+              "UninstallString" "\$INSTDIR\uninstall.exe"
+
+            WriteUninstaller "\$INSTDIR\uninstall.exe"
+          SectionEnd
+
+          Section "Uninstall"
+            RMDir /r "\$INSTDIR"
+            Delete "\$DESKTOP\Mweru - Game Engine.lnk"
+            RMDir /r "\$SMPROGRAMS\Mweru Game Engine"
+            DeleteRegKey HKLM "Software\Microsoft\Windows\CurrentVersion\Uninstall\MweruGameEngine"
+          SectionEnd
+          NSIS
+
+      - name: Build Windows .exe installer
+        run: makensis installer.nsi
+
+      - name: Upload Windows artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-release
+          path: Mweru-GameEngine-*-windows-setup.exe
+
+  # ============================================================
+  # RELEASE — publishes everything to GitHub Releases page
+  # ============================================================
+  publish-release:
+    name: Publish GitHub Release
+    needs: [build-linux, build-windows]
+    runs-on: ubuntu-latest
+    if: startsWith(github.ref, 'refs/tags/')
+
+    steps:
+      - name: Download Linux artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: linux-release
+
+      - name: Download Windows artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: windows-release
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Mweru - Game Engine ${{ github.ref_name }}"
+          body: |
+            ## Download
+
+            | Platform | File | Instructions |
+            |---|---|---|
+            | **Ubuntu / Linux** | `Mweru-GameEngine-*-linux-amd64.deb` | Double-click → Install |
+            | **Windows** | `Mweru-GameEngine-*-windows-setup.exe` | Double-click → Next → Finish |
+
+            ## What's new
+            _Add your release notes here._
+          files: |
+            Mweru-GameEngine-*.deb
+            Mweru-GameEngine-*.AppImage
+            Mweru-GameEngine-*-windows-setup.exe
