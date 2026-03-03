@@ -24,16 +24,11 @@ jobs:
         run: |
           sudo apt-get update
           sudo apt-get install -y \
-            cmake build-essential python3-pip \
+            cmake build-essential \
             libsdl2-dev \
             libopenal-dev \
             libsndfile1-dev \
             wget
-
-      - name: Set up GLAD (generate OpenGL loader)
-        run: |
-          pip3 install glad
-          python3 -m glad --api="gl:core=4.5" --generator=c --out-path=vendor/glad
 
       - name: Set up GLM (math library)
         run: |
@@ -197,12 +192,6 @@ jobs:
           vcpkg install sdl2:x64-windows openal-soft:x64-windows libsndfile:x64-windows
         env:
           VCPKG_DEFAULT_TRIPLET: x64-windows
-
-      - name: Set up GLAD
-        shell: bash
-        run: |
-          pip install glad
-          python -m glad --api="gl:core=4.5" --generator=c --out-path=vendor/glad
 
       - name: Set up GLM
         shell: bash

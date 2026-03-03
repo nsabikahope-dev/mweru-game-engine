@@ -40,8 +40,6 @@ compile_commands.json
 Makefile
 
 # Dependencies (will be downloaded)
-vendor/glad/src/
-vendor/glad/include/
 vendor/glm/
 vendor/stb/*.h
 
