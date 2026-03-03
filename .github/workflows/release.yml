@@ -223,7 +223,9 @@ jobs:
           cp -r assets windows-dist/assets
 
       - name: Install NSIS
-        run: choco install nsis -y
+        run: |
+          choco install nsis -y
+          echo "C:\Program Files (x86)\NSIS" | Out-File -Append -FilePath $env:GITHUB_PATH -Encoding utf8
 
       - name: Create NSIS installer script
         shell: bash
