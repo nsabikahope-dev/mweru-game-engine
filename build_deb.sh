@@ -60,7 +60,7 @@ cat > "$DEB_ROOT/usr/share/applications/GameEngine.desktop" << DESKTOP
 [Desktop Entry]
 Name=Game Engine
 Comment=Create 2D games and visual novels — no coding required
-Exec=/opt/GameEngine/GameEngine
+Exec=/opt/GameEngine/GameEngine --appimage-extract-and-run
 Icon=GameEngine
 Type=Application
 Categories=Development;Game;

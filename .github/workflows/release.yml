@@ -138,10 +138,11 @@ jobs:
           [Desktop Entry]
           Name=Mweru - Game Engine
           Comment=Create 2D games and visual novels — no coding required
-          Exec=/opt/MweruGameEngine/MweruGameEngine
+          Exec=/opt/MweruGameEngine/MweruGameEngine --appimage-extract-and-run
           Icon=MweruGameEngine
           Type=Application
           Categories=Development;Game;
+          StartupNotify=true
           DESKTOP
 
           KB=$(du -sk "$DEB_ROOT/opt" "$DEB_ROOT/usr" | awk '{sum+=$1}END{print sum}')
