@@ -1,14 +1,25 @@
 #include "Engine/Audio/AudioEngine.h"
 
+#ifndef __EMSCRIPTEN__
 #include <AL/al.h>
 #include <AL/alc.h>
 #include <iostream>
+#endif
 
 namespace Engine {
 
 bool   AudioEngine::s_Initialized = false;
 void*  AudioEngine::s_Device      = nullptr;
 void*  AudioEngine::s_Context     = nullptr;
+
+#ifdef __EMSCRIPTEN__
+// Audio is silent on WebAssembly builds (OpenAL/sndfile not available)
+void  AudioEngine::Init()              { s_Initialized = true; }
+void  AudioEngine::Shutdown()          { s_Initialized = false; }
+void  AudioEngine::SetMasterVolume(float) {}
+float AudioEngine::GetMasterVolume()   { return 1.0f; }
+
+#else
 
 void AudioEngine::Init()
 {
@@ -79,5 +90,7 @@ float AudioEngine::GetMasterVolume()
         alGetListenerf(AL_GAIN, &gain);
     return gain;
 }
+
+#endif // __EMSCRIPTEN__
 
 } // namespace Engine

@@ -100,7 +100,59 @@ void Renderer2D::Init()
 
     s_Data.TextureSlots[0] = s_Data.WhiteTexture;
 
-    // Create shader
+    // Create shader — two variants: WebGL2 (GLSL ES 3.00) and desktop OpenGL 3.3
+#ifdef __EMSCRIPTEN__
+    std::string vertexSrc = R"(#version 300 es
+        precision mediump float;
+        layout(location = 0) in vec3 a_Position;
+        layout(location = 1) in vec4 a_Color;
+        layout(location = 2) in vec2 a_TexCoord;
+        layout(location = 3) in float a_TexIndex;
+
+        uniform mat4 u_ViewProjection;
+
+        out vec4 v_Color;
+        out vec2 v_TexCoord;
+        out float v_TexIndex;
+
+        void main()
+        {
+            v_Color = a_Color;
+            v_TexCoord = a_TexCoord;
+            v_TexIndex = a_TexIndex;
+            gl_Position = u_ViewProjection * vec4(a_Position, 1.0);
+        }
+    )";
+
+    std::string fragmentSrc = R"(#version 300 es
+        precision mediump float;
+        layout(location = 0) out vec4 color;
+
+        in vec4 v_Color;
+        in vec2 v_TexCoord;
+        in float v_TexIndex;
+
+        uniform sampler2D u_Textures[8];
+
+        void main()
+        {
+            vec4 texColor = v_Color;
+            int index = int(v_TexIndex);
+
+            // if-else chain for WebGL2 compatibility (switch on non-const int is unreliable)
+            if      (index == 0) texColor *= texture(u_Textures[0], v_TexCoord);
+            else if (index == 1) texColor *= texture(u_Textures[1], v_TexCoord);
+            else if (index == 2) texColor *= texture(u_Textures[2], v_TexCoord);
+            else if (index == 3) texColor *= texture(u_Textures[3], v_TexCoord);
+            else if (index == 4) texColor *= texture(u_Textures[4], v_TexCoord);
+            else if (index == 5) texColor *= texture(u_Textures[5], v_TexCoord);
+            else if (index == 6) texColor *= texture(u_Textures[6], v_TexCoord);
+            else if (index == 7) texColor *= texture(u_Textures[7], v_TexCoord);
+
+            color = texColor;
+        }
+    )";
+#else
     std::string vertexSrc = R"(
         #version 330 core
         layout(location = 0) in vec3 a_Position;
@@ -154,6 +206,7 @@ void Renderer2D::Init()
             color = texColor;
         }
     )";
+#endif
 
     s_Data.TextureShader = Shader::CreateFromSource(vertexSrc, fragmentSrc);
 

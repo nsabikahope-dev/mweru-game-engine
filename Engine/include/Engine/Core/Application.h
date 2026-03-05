@@ -42,6 +42,9 @@ public:
     /** Request the application to stop at the end of the current frame. */
     void Close() { m_Running = false; }
 
+    /** Execute exactly one frame (used by the Emscripten main loop callback). */
+    void RunOneFrame();
+
     Window& GetWindow() { return *m_Window; }
 
     static Application& Get() { return *s_Instance; }

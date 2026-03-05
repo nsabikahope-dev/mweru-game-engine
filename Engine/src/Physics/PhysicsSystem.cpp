@@ -1,11 +1,51 @@
 #include "Engine/Physics/PhysicsSystem.h"
 #include "Engine/Scene/Scene.h"
 #include "Engine/ECS/Components.h"
+#include "Engine/Scripting/LuaScriptEngine.h"
 
 #include <box2d/box2d.h>
 #include <iostream>
+#include <memory>
 
 namespace Engine {
+
+// ---------------------------------------------------------------------------
+// Contact listener — fires OnCollision(otherName) into Lua when two physics
+// bodies begin touching.
+// ---------------------------------------------------------------------------
+class SceneContactListener : public b2ContactListener
+{
+public:
+    explicit SceneContactListener(Scene* scene) : m_Scene(scene) {}
+
+    void BeginContact(b2Contact* contact) override
+    {
+        auto* bodyA = contact->GetFixtureA()->GetBody();
+        auto* bodyB = contact->GetFixtureB()->GetBody();
+
+        auto rawA = static_cast<uint32_t>(bodyA->GetUserData().pointer);
+        auto rawB = static_cast<uint32_t>(bodyB->GetUserData().pointer);
+        auto idA  = static_cast<entt::entity>(rawA);
+        auto idB  = static_cast<entt::entity>(rawB);
+
+        auto& reg = m_Scene->GetRegistry();
+        if (!reg.valid(idA) || !reg.valid(idB)) return;
+
+        std::string nameA = reg.all_of<TagComponent>(idA)
+                                ? reg.get<TagComponent>(idA).Tag : "";
+        std::string nameB = reg.all_of<TagComponent>(idB)
+                                ? reg.get<TagComponent>(idB).Tag : "";
+
+        // Fire into each entity's Lua script (if it has one)
+        LuaScriptEngine::FireCollision(m_Scene, rawA, nameB);
+        LuaScriptEngine::FireCollision(m_Scene, rawB, nameA);
+    }
+
+private:
+    Scene* m_Scene;
+};
+
+static std::unique_ptr<SceneContactListener> s_ContactListener;
 
 static b2BodyType Rigidbody2DTypeToBox2DType(RigidbodyComponent::BodyType bodyType)
 {
@@ -31,6 +71,10 @@ void PhysicsSystem::OnSceneStart(Scene* scene, PhysicsWorld* physicsWorld)
     }
 
     std::cout << "[PhysicsSystem] Created " << count << " physics bodies\n";
+
+    // Register collision listener so Lua scripts receive OnCollision callbacks
+    s_ContactListener = std::make_unique<SceneContactListener>(scene);
+    physicsWorld->GetNativeWorld()->SetContactListener(s_ContactListener.get());
 }
 
 void PhysicsSystem::OnUpdate(Scene* scene, PhysicsWorld* physicsWorld, float deltaTime)
@@ -52,6 +96,9 @@ void PhysicsSystem::OnSceneStop(Scene* scene)
     }
 
     std::cout << "[PhysicsSystem] Destroyed all physics bodies\n";
+
+    // Detach listener before the world is destroyed
+    s_ContactListener.reset();
 }
 
 void PhysicsSystem::CreateBody(Scene* scene, entt::entity entity, PhysicsWorld* physicsWorld)
@@ -69,6 +116,8 @@ void PhysicsSystem::CreateBody(Scene* scene, entt::entity entity, PhysicsWorld* 
     bodyDef.gravityScale = rb.GravityScale;
 
     b2Body* body = physicsWorld->GetNativeWorld()->CreateBody(&bodyDef);
+    // Store entity handle so the contact listener can look up names/scripts
+    body->GetUserData().pointer = static_cast<uintptr_t>(static_cast<uint32_t>(entity));
     rb.RuntimeBody = body;
 
     // Add box collider if present

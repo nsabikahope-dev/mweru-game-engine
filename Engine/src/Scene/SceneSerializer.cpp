@@ -216,6 +216,30 @@ static void SerializeEntity(json& j, Entity entity)
             {"ShowBorder",      panel.ShowBorder}
         };
     }
+
+    // Timer
+    if (entity.HasComponent<TimerComponent>())
+    {
+        auto& t = entity.GetComponent<TimerComponent>();
+        j["TimerComponent"] = {
+            {"Duration",   t.Duration},
+            {"CountDown",  t.CountDown},
+            {"Active",     t.Active},
+            {"Loop",       t.Loop}
+        };
+    }
+
+    // Video
+    if (entity.HasComponent<VideoComponent>())
+    {
+        auto& vc = entity.GetComponent<VideoComponent>();
+        j["VideoComponent"] = {
+            {"VideoUrl",  vc.VideoUrl},
+            {"Loop",      vc.Loop},
+            {"AutoPlay",  vc.AutoPlay},
+            {"Visible",   vc.Visible}
+        };
+    }
 }
 
 static void DeserializeEntity(const json& j, Entity entity)
@@ -414,6 +438,26 @@ static void DeserializeEntity(const json& j, Entity entity)
         panel.BorderWidth     = j["PanelComponent"]["BorderWidth"];
         panel.ShowBackground  = j["PanelComponent"]["ShowBackground"];
         panel.ShowBorder      = j["PanelComponent"]["ShowBorder"];
+    }
+
+    // Timer
+    if (j.contains("TimerComponent"))
+    {
+        auto& t = entity.AddComponent<TimerComponent>();
+        t.Duration  = j["TimerComponent"]["Duration"];
+        t.CountDown = j["TimerComponent"]["CountDown"];
+        t.Active    = j["TimerComponent"]["Active"];
+        t.Loop      = j["TimerComponent"]["Loop"];
+    }
+
+    // Video
+    if (j.contains("VideoComponent"))
+    {
+        auto& vc = entity.AddComponent<VideoComponent>();
+        vc.VideoUrl = j["VideoComponent"]["VideoUrl"].get<std::string>();
+        vc.Loop     = j["VideoComponent"]["Loop"];
+        vc.AutoPlay = j["VideoComponent"]["AutoPlay"];
+        vc.Visible  = j["VideoComponent"]["Visible"];
     }
 }
 

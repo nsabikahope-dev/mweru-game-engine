@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+  <title>Kirkiana Games</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+
+    body {
+      background: #141020;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      height: 100dvh;
+      font-family: system-ui, sans-serif;
+      overflow: hidden;
+    }
+
+    #canvas-wrap {
+      position: relative;
+      width: 100%;
+      max-width: min(100vw, 177.78vh); /* 16:9 */
+      aspect-ratio: 16 / 9;
+    }
+
+    #canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      touch-action: none;
+    }
+
+    #loading {
+      position: absolute;
+      inset: 0;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      background: #0e0b1a;
+      color: #ccc;
+      gap: 20px;
+      transition: opacity 0.4s;
+    }
+
+    #loading.hidden { opacity: 0; pointer-events: none; }
+
+    .logo-text {
+      font-size: clamp(1.5rem, 5vw, 3rem);
+      font-weight: 800;
+      letter-spacing: 0.15em;
+      color: #f2b83c;
+    }
+
+    .logo-sub {
+      font-size: clamp(0.7rem, 2vw, 1.1rem);
+      letter-spacing: 0.5em;
+      color: #aab;
+      margin-top: -12px;
+    }
+
+    .progress-wrap {
+      width: clamp(160px, 40vw, 300px);
+      height: 6px;
+      background: #2a2040;
+      border-radius: 3px;
+      overflow: hidden;
+    }
+
+    .progress-bar {
+      height: 100%;
+      background: linear-gradient(90deg, #f2b83c, #e06020);
+      border-radius: 3px;
+      width: 0%;
+      transition: width 0.2s;
+    }
+
+    #status-text {
+      font-size: 0.78rem;
+      color: #667;
+      min-height: 1em;
+    }
+
+    #fullscreen-btn {
+      position: absolute;
+      bottom: 10px;
+      right: 10px;
+      background: rgba(255,255,255,0.1);
+      border: none;
+      color: #aaa;
+      padding: 6px 10px;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 0.75rem;
+      z-index: 10;
+    }
+    #fullscreen-btn:hover { background: rgba(255,255,255,0.2); color: #fff; }
+  </style>
+</head>
+<body>
+  <div id="canvas-wrap">
+    <canvas id="canvas" oncontextmenu="event.preventDefault()"></canvas>
+
+    <div id="loading">
+      <div class="logo-text">KIRKIANA</div>
+      <div class="logo-sub">GAMES</div>
+      <div class="progress-wrap">
+        <div class="progress-bar" id="progress-bar"></div>
+      </div>
+      <div id="status-text">Loading…</div>
+    </div>
+
+    <button id="fullscreen-btn" onclick="toggleFullscreen()">⛶ Fullscreen</button>
+  </div>
+
+  <script>
+    // Emscripten module configuration — must be defined before the script is loaded
+    var Module = {
+      canvas: (function() { return document.getElementById('canvas'); })(),
+
+      setStatus: function(text) {
+        var el = document.getElementById('status-text');
+        if (el) el.textContent = text || '';
+      },
+
+      monitorRunDependencies: function(left) {
+        var bar = document.getElementById('progress-bar');
+        if (!bar) return;
+        if (left === 0) {
+          // All dependencies loaded — hide loading screen
+          var loading = document.getElementById('loading');
+          if (loading) loading.classList.add('hidden');
+          bar.style.width = '100%';
+        } else {
+          bar.style.width = Math.max(10, 100 - left * 5) + '%';
+        }
+      },
+
+      onRuntimeInitialized: function() {
+        console.log('[Kirkiana] WASM runtime ready');
+      },
+
+      print: function(text)    { console.log(text); },
+      printErr: function(text) { console.error(text); },
+    };
+
+    function toggleFullscreen() {
+      var wrap = document.getElementById('canvas-wrap');
+      if (!document.fullscreenElement) {
+        (wrap.requestFullscreen || wrap.webkitRequestFullscreen).call(wrap);
+      } else {
+        (document.exitFullscreen || document.webkitExitFullscreen).call(document);
+      }
+    }
+
+    // Resize canvas to fill its container while preserving aspect ratio
+    function resizeCanvas() {
+      var wrap = document.getElementById('canvas-wrap');
+      var canvas = document.getElementById('canvas');
+      if (!canvas || !wrap) return;
+      canvas.width  = wrap.clientWidth;
+      canvas.height = wrap.clientHeight;
+    }
+    window.addEventListener('resize', resizeCanvas);
+    resizeCanvas();
+  </script>
+
+  {{{ SCRIPT }}}
+</body>
+</html>

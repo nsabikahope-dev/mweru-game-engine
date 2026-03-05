@@ -11,6 +11,10 @@
 #include <box2d/box2d.h>
 #include <AL/al.h>
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
+#endif
+
 #include <unordered_map>
 #include <iostream>
 
@@ -20,6 +24,8 @@ namespace Engine {
 // Internal state: one sol::state per entity (keyed by entity uint32_t ID)
 // -----------------------------------------------------------------------
 static std::unordered_map<uint32_t, std::unique_ptr<sol::state>> s_States;
+static GameState s_GameState        = GameState::Playing;
+static int       s_PendingLevelIndex = -1; // -1 = no pending level load
 
 // -----------------------------------------------------------------------
 // Key name -> KeyCode mapping for student-friendly string-based input
@@ -197,6 +203,17 @@ static void SetupLuaState(sol::state& lua, Scene* scene, Entity entity)
         }
     });
 
+    // --- Particle functions --------------------------------------------
+    lua.set_function("SetEmitting", [entity](bool active) mutable {
+        if (entity.HasComponent<ParticleEmitterComponent>())
+            entity.GetComponent<ParticleEmitterComponent>().Emitting = active;
+    });
+    lua.set_function("IsEmitting", [entity]() mutable -> bool {
+        if (entity.HasComponent<ParticleEmitterComponent>())
+            return entity.GetComponent<ParticleEmitterComponent>().Emitting;
+        return false;
+    });
+
     // --- Audio functions -----------------------------------------------
     lua.set_function("PlayAudio",  [entity]() mutable { AudioSystem::Play(entity);  });
     lua.set_function("StopAudio",  [entity]() mutable { AudioSystem::Stop(entity);  });
@@ -367,6 +384,202 @@ static void SetupLuaState(sol::state& lua, Scene* scene, Entity entity)
         }
         return false;
     });
+
+    sceneApi.set_function("SetEmitting",
+        [scene](const std::string& name, bool active)
+    {
+        auto& reg = scene->GetRegistry();
+        auto view  = reg.view<TagComponent, ParticleEmitterComponent>();
+        for (auto h : view) {
+            if (view.get<TagComponent>(h).Tag == name) {
+                view.get<ParticleEmitterComponent>(h).Emitting = active;
+                return;
+            }
+        }
+    });
+
+    // --- Timer functions (operate on this entity's TimerComponent) --------
+    lua.set_function("StartTimer", [entity]() mutable {
+        if (entity.HasComponent<TimerComponent>()) {
+            auto& t = entity.GetComponent<TimerComponent>();
+            t.Elapsed  = 0.0f;
+            t.Expired  = false;
+            t.Active   = true;
+        }
+    });
+    lua.set_function("StopTimer", [entity]() mutable {
+        if (entity.HasComponent<TimerComponent>())
+            entity.GetComponent<TimerComponent>().Active = false;
+    });
+    lua.set_function("ResetTimer", [entity]() mutable {
+        if (entity.HasComponent<TimerComponent>()) {
+            auto& t = entity.GetComponent<TimerComponent>();
+            t.Elapsed  = 0.0f;
+            t.Expired  = false;
+        }
+    });
+    lua.set_function("GetTimerElapsed", [entity]() mutable -> float {
+        if (entity.HasComponent<TimerComponent>())
+            return entity.GetComponent<TimerComponent>().Elapsed;
+        return 0.0f;
+    });
+    lua.set_function("GetTimerRemaining", [entity]() mutable -> float {
+        if (entity.HasComponent<TimerComponent>())
+            return entity.GetComponent<TimerComponent>().GetRemaining();
+        return 0.0f;
+    });
+    lua.set_function("IsTimerExpired", [entity]() mutable -> bool {
+        if (entity.HasComponent<TimerComponent>())
+            return entity.GetComponent<TimerComponent>().Expired;
+        return false;
+    });
+
+    // --- Game state table (global, shared across all entity scripts) ------
+    sol::table game = lua.create_named_table("Game");
+
+    game.set_function("Pause",    []() { s_GameState = GameState::Paused;  });
+    game.set_function("Resume",   []() { s_GameState = GameState::Playing; });
+    game.set_function("Win",      []() { s_GameState = GameState::Won;     });
+    game.set_function("Lose",     []() { s_GameState = GameState::Lost;    });
+    game.set_function("IsPaused", []() -> bool { return s_GameState == GameState::Paused; });
+    game.set_function("IsWon",    []() -> bool { return s_GameState == GameState::Won;    });
+    game.set_function("IsLost",   []() -> bool { return s_GameState == GameState::Lost;   });
+    game.set_function("GetState", []() -> std::string {
+        switch (s_GameState) {
+            case GameState::Playing: return "playing";
+            case GameState::Paused:  return "paused";
+            case GameState::Won:     return "won";
+            case GameState::Lost:    return "lost";
+        }
+        return "playing";
+    });
+    // Game.SubmitScore — no-op in native; uses fetch() in WASM build
+    game.set_function("SubmitScore", [](int score) {
+#ifdef __EMSCRIPTEN__
+        EM_ASM({ if (window._submitScore) window._submitScore($0); }, score);
+#else
+        (void)score;
+#endif
+    });
+
+    // Game.LoadLevel(n) — queue a level transition; polled by the runtime each frame
+    // Desktop: loads "levels/levelN.scene"
+    // Web:     fetches "/api/games/<gameId>/scenes/N"
+    game.set_function("LoadLevel", [](int n) {
+        s_PendingLevelIndex = n;
+    });
+
+    // --- Video (HTML5 overlay on web; console log on desktop) ---------------
+    lua.set_function("PlayVideo", [entity](const std::string& url) mutable {
+        if (entity.HasComponent<VideoComponent>())
+            entity.GetComponent<VideoComponent>().VideoUrl = url;
+#ifdef __EMSCRIPTEN__
+        EM_ASM({
+            if (window._videoPlay) window._videoPlay(UTF8ToString($0));
+        }, url.c_str());
+#else
+        std::cout << "[Video] PlayVideo: " << url << "\n";
+#endif
+    });
+
+    lua.set_function("PauseVideo", []() {
+#ifdef __EMSCRIPTEN__
+        EM_ASM({ if (window._videoPause) window._videoPause(); });
+#else
+        std::cout << "[Video] PauseVideo\n";
+#endif
+    });
+
+    lua.set_function("StopVideo", [entity]() mutable {
+        if (entity.HasComponent<VideoComponent>())
+            entity.GetComponent<VideoComponent>().Visible = false;
+#ifdef __EMSCRIPTEN__
+        EM_ASM({ if (window._videoStop) window._videoStop(); });
+#else
+        std::cout << "[Video] StopVideo\n";
+#endif
+    });
+
+    lua.set_function("IsVideoPlaying", []() -> bool {
+#ifdef __EMSCRIPTEN__
+        return EM_ASM_INT({
+            return (window._videoIsPlaying && window._videoIsPlaying()) ? 1 : 0;
+        }) != 0;
+#else
+        return false;
+#endif
+    });
+
+    lua.set_function("SetVideoLoop", [](bool loop) {
+#ifdef __EMSCRIPTEN__
+        EM_ASM({ if (window._videoSetLoop) window._videoSetLoop($0); }, loop ? 1 : 0);
+#else
+        (void)loop;
+#endif
+    });
+
+#ifdef __EMSCRIPTEN__
+    // --- Network table (web / multiplayer via socket.io + WebRTC) ------------
+    // JS side (multiplayer.js) exposes:
+    //   window._netSend(key, val)
+    //   window._netDequeue()        -> JSON string or ""
+    //   window._netConnected()      -> 0 or 1
+    //   window._netPlayerCount()    -> int
+    sol::table net = lua.create_named_table("Network");
+
+    net.set_function("Send", [](const std::string& key, const std::string& val) {
+        EM_ASM({
+            if (window._netSend)
+                window._netSend(UTF8ToString($0), UTF8ToString($1));
+        }, key.c_str(), val.c_str());
+    });
+
+    net.set_function("IsConnected", []() -> bool {
+        return EM_ASM_INT({
+            return (window._netConnected && window._netConnected()) ? 1 : 0;
+        }) != 0;
+    });
+
+    net.set_function("GetPlayerCount", []() -> int {
+        return EM_ASM_INT({
+            return window._netPlayerCount ? window._netPlayerCount() : 1;
+        });
+    });
+
+    net.set_function("Receive", [](sol::this_state s) -> sol::object {
+        char buf[2048] = {};
+        int got = EM_ASM_INT({
+            if (!window._netDequeue) { return 0; }
+            var msg = window._netDequeue();
+            if (!msg || msg.length === 0) { return 0; }
+            var enc = new TextEncoder();
+            var bytes = enc.encode(msg);
+            var len = Math.min(bytes.length, 2047);
+            HEAPU8.set(bytes.subarray(0, len), $0);
+            HEAPU8[$0 + len] = 0;
+            return 1;
+        }, buf);
+        if (!got) return sol::nil;
+
+        // buf contains JSON: {"from":"x","key":"y","value":"z"}
+        // Simple extraction (no json dep needed here)
+        sol::state_view lv(s);
+        sol::table t = lv.create_table();
+        std::string j(buf);
+        auto extract = [&](const std::string& field) -> std::string {
+            std::string search = "\"" + field + "\":\"";
+            auto pos = j.find(search);
+            if (pos == std::string::npos) return "";
+            pos += search.size();
+            auto end = j.find('"', pos);
+            return j.substr(pos, end - pos);
+        };
+        t["from"]  = extract("from");
+        t["key"]   = extract("key");
+        t["value"] = extract("value");
+        return t;
+    });
+#endif
 }
 
 // -----------------------------------------------------------------------
@@ -508,6 +721,49 @@ void LuaScriptEngine::OnUpdate(Scene* scene, float deltaTime)
             sc.Enabled = false;
         }
     }
+}
+
+void LuaScriptEngine::FireCollision(Scene* /*scene*/, uint32_t entityID,
+                                    const std::string& otherName)
+{
+    auto it = s_States.find(entityID);
+    if (it == s_States.end()) return;
+
+    sol::protected_function fn = (*it->second)["OnCollision"];
+    if (!fn.valid()) return;
+
+    sol::protected_function_result res = fn(otherName);
+    if (!res.valid()) {
+        sol::error err = res;
+        std::cerr << "[LuaScriptEngine] OnCollision error: " << err.what() << "\n";
+    }
+}
+
+void LuaScriptEngine::FireEvent(Scene* /*scene*/, Entity entity, const std::string& fnName)
+{
+    auto it = s_States.find(entity.GetID());
+    if (it == s_States.end()) return;
+
+    sol::protected_function fn = (*it->second)[fnName];
+    if (!fn.valid()) return;
+
+    sol::protected_function_result res = fn();
+    if (!res.valid()) {
+        sol::error err = res;
+        std::cerr << "[LuaScriptEngine] " << fnName << " error: " << err.what() << "\n";
+    }
+}
+
+GameState LuaScriptEngine::GetGameState()  { return s_GameState; }
+void      LuaScriptEngine::SetGameState(GameState s) { s_GameState = s; }
+void      LuaScriptEngine::ResetGameState() { s_GameState = GameState::Playing; }
+
+bool LuaScriptEngine::HasPendingLevel() { return s_PendingLevelIndex >= 0; }
+int  LuaScriptEngine::GetAndClearPendingLevel()
+{
+    int idx = s_PendingLevelIndex;
+    s_PendingLevelIndex = -1;
+    return idx;
 }
 
 } // namespace Engine

@@ -5,6 +5,15 @@
 #include <glad/glad.h>
 #include <iostream>
 
+#ifdef __EMSCRIPTEN__
+#include <emscripten/emscripten.h>
+static void EmscriptenLoop(void* arg)
+{
+    Engine::Application* app = static_cast<Engine::Application*>(arg);
+    app->RunOneFrame();
+}
+#endif
+
 namespace Engine {
 
 Application* Application::s_Instance = nullptr;
@@ -29,48 +38,50 @@ Application::~Application()
     OnShutdown();
 }
 
+void Application::RunOneFrame()
+{
+    if (!m_Running || m_Window->ShouldClose())
+    {
+#ifdef __EMSCRIPTEN__
+        emscripten_cancel_main_loop();
+        OnShutdown();
+#endif
+        return;
+    }
+
+    float time = SDL_GetTicks() / 1000.0f;
+    Timestep timestep = time - m_LastFrameTime;
+    m_LastFrameTime = time;
+
+    Input::Update();
+    m_Window->PollEvents();
+    OnUpdate(timestep);
+
+    glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
+    glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
+    OnRender();
+
+    m_Window->SwapBuffers();
+}
+
 void Application::Run()
 {
-    // Call user init now that object is fully constructed
     OnInit();
-
-    // Register per-event callback so subclasses (e.g. the Editor) can forward
-    // raw SDL events to ImGui or other backends before Input state is updated.
     m_Window->SetEventCallback([this](SDL_Event* e) { HandleEvent(e); });
 
     std::cout << "Starting application...\n";
-
     m_Running = true;
     m_LastFrameTime = SDL_GetTicks() / 1000.0f;
 
-    // Main game loop
+#ifdef __EMSCRIPTEN__
+    // Browser controls the loop — hand control to Emscripten
+    emscripten_set_main_loop_arg(EmscriptenLoop, this, 0, 1);
+#else
     while (m_Running && !m_Window->ShouldClose())
-    {
-        // Calculate delta time
-        float time = SDL_GetTicks() / 1000.0f;
-        Timestep timestep = time - m_LastFrameTime;
-        m_LastFrameTime = time;
-
-        // Snapshot previous frame's input state BEFORE processing new events
-        Input::Update();
-
-        // Poll SDL events and feed them into the Input state
-        m_Window->PollEvents();
-
-        // Update game logic
-        OnUpdate(timestep);
-
-        // Render
-        glClearColor(0.1f, 0.1f, 0.1f, 1.0f);
-        glClear(GL_COLOR_BUFFER_BIT | GL_DEPTH_BUFFER_BIT);
-
-        OnRender();
-
-        // Swap buffers to display
-        m_Window->SwapBuffers();
-    }
+        RunOneFrame();
 
     std::cout << "Application shutting down...\n";
+#endif
 }
 
 } // namespace Engine

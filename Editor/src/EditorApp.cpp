@@ -9,17 +9,21 @@
 #include <Engine/Input/Input.h>
 #include <Engine/Rendering/Renderer2D.h>
 #include <Engine/Rendering/Framebuffer.h>
+#include <Engine/Rendering/Texture.h>
 #include <Engine/Scripting/LuaScriptEngine.h>
 #include <Engine/Audio/AudioEngine.h>
 #include <Engine/Audio/AudioSystem.h>
 #include <Engine/Animation/AnimationSystem.h>
 #include <Engine/Particles/ParticleSystem.h>
+#include <Engine/Game/GameTimerSystem.h>
 
 #include "../include/EditorCamera.h"
 #include "../include/GridRenderer.h"
 #include "../include/AIHelper.h"
+#include "../include/UpdateChecker.h"
 
 #include <imgui.h>
+#include <imgui_internal.h>
 #include <imgui_impl_sdl2.h>
 #include <imgui_impl_opengl3.h>
 
@@ -28,6 +32,7 @@
 
 #include <iostream>
 #include <fstream>
+#include <filesystem>
 #include <cctype>
 #include <memory>
 
@@ -37,7 +42,7 @@ class EditorApp : public Application
 {
 public:
     EditorApp()
-        : Application("Game Engine Editor", 1920, 1080)
+        : Application("Kirkiana Games Studio", 1920, 1080)
     {
     }
 
@@ -91,6 +96,9 @@ public:
         PhysicsSystem::OnSceneStart(m_Scene.get(), m_PhysicsWorld.get());
 
         std::cout << "Editor initialized successfully!\n\n";
+
+        // Kick off background update check
+        m_UpdateChecker.CheckAsync();
     }
 
     void CreateDefaultScene()
@@ -142,11 +150,50 @@ public:
         // Update physics, scripts, audio, animation and particles if playing
         if (m_ScenePlaying)
         {
-            PhysicsSystem::OnUpdate(m_Scene.get(), m_PhysicsWorld.get(), ts.GetSeconds());
-            LuaScriptEngine::OnUpdate(m_Scene.get(), ts.GetSeconds());
-            AudioSystem::OnUpdate(m_Scene.get());
-            AnimationSystem::OnUpdate(m_Scene.get(), ts.GetSeconds());
-            ParticleSystem::OnUpdate(m_Scene.get(), ts.GetSeconds());
+            // P key toggles pause
+            if (Input::IsKeyPressed(KeyCode::P))
+            {
+                if (LuaScriptEngine::GetGameState() == GameState::Playing)
+                    LuaScriptEngine::SetGameState(GameState::Paused);
+                else if (LuaScriptEngine::GetGameState() == GameState::Paused)
+                    LuaScriptEngine::SetGameState(GameState::Playing);
+            }
+
+            // Only run systems when the game is actually playing (not paused/won/lost)
+            if (LuaScriptEngine::GetGameState() == GameState::Playing)
+            {
+                PhysicsSystem::OnUpdate(m_Scene.get(), m_PhysicsWorld.get(), ts.GetSeconds());
+                LuaScriptEngine::OnUpdate(m_Scene.get(), ts.GetSeconds());
+                AudioSystem::OnUpdate(m_Scene.get());
+                AnimationSystem::OnUpdate(m_Scene.get(), ts.GetSeconds());
+                ParticleSystem::OnUpdate(m_Scene.get(), ts.GetSeconds());
+                GameTimerSystem::OnUpdate(m_Scene.get(), ts.GetSeconds());
+            }
+
+            // Level transitions queued by Game.LoadLevel(n) in Lua
+            if (LuaScriptEngine::HasPendingLevel())
+            {
+                int levelIdx = LuaScriptEngine::GetAndClearPendingLevel();
+                std::string levelPath = "levels/level" + std::to_string(levelIdx) + ".scene";
+                std::cout << "[Editor] Level transition to: " << levelPath << "\n";
+
+                LuaScriptEngine::OnSceneStop(m_Scene.get());
+                AnimationSystem::OnSceneStop(m_Scene.get());
+                AudioSystem::OnSceneStop(m_Scene.get());
+                ParticleSystem::OnSceneStop(m_Scene.get());
+                PhysicsSystem::OnSceneStop(m_Scene.get());
+
+                m_Scene = std::make_unique<Scene>();
+                if (!SceneSerializer::Deserialize(m_Scene.get(), levelPath))
+                    std::cerr << "[Editor] Failed to load level " << levelPath << "\n";
+                m_SelectedEntity = {};
+
+                LuaScriptEngine::ResetGameState();
+                PhysicsSystem::OnSceneStart(m_Scene.get(), m_PhysicsWorld.get());
+                AnimationSystem::OnSceneStart(m_Scene.get());
+                AudioSystem::OnSceneStart(m_Scene.get());
+                LuaScriptEngine::OnSceneStart(m_Scene.get());
+            }
         }
 
         m_Scene->OnUpdate(ts.GetSeconds());
@@ -161,6 +208,35 @@ public:
 
         // Dockspace
         ImGuiID dockspace_id = ImGui::DockSpaceOverViewport(0, ImGui::GetMainViewport());
+
+        // Build default panel layout on first frame (overrides any saved imgui.ini)
+        static bool s_LayoutReady = false;
+        if (!s_LayoutReady)
+        {
+            s_LayoutReady = true;
+
+            ImGui::DockBuilderRemoveNode(dockspace_id);
+            ImGui::DockBuilderAddNode(dockspace_id, ImGuiDockNodeFlags_DockSpace);
+            ImGui::DockBuilderSetNodeSize(dockspace_id, ImGui::GetMainViewport()->Size);
+
+            // Split: left strip for Objects
+            ImGuiID center = dockspace_id;
+            ImGuiID left   = ImGui::DockBuilderSplitNode(center, ImGuiDir_Left,  0.18f, nullptr, &center);
+
+            // Split: right strip for Properties + Profiler
+            ImGuiID right  = ImGui::DockBuilderSplitNode(center, ImGuiDir_Right, 0.25f, nullptr, &center);
+
+            // Split the right strip vertically: Properties on top, Profiler below
+            ImGuiID right_bottom;
+            ImGui::DockBuilderSplitNode(right, ImGuiDir_Down, 0.35f, &right_bottom, &right);
+
+            ImGui::DockBuilderDockWindow("Objects",    left);
+            ImGui::DockBuilderDockWindow("Viewport",   center);
+            ImGui::DockBuilderDockWindow("Properties", right);
+            ImGui::DockBuilderDockWindow("Profiler",   right_bottom);
+
+            ImGui::DockBuilderFinish(dockspace_id);
+        }
 
         // Menu Bar
         if (ImGui::BeginMainMenuBar())
@@ -191,13 +267,14 @@ public:
                 ImGui::EndMenu();
             }
 
-            if (ImGui::BeginMenu("Scene"))
+            if (ImGui::BeginMenu("Game"))
             {
-                if (ImGui::MenuItem("Play", nullptr, m_ScenePlaying))
+                if (ImGui::MenuItem(m_ScenePlaying ? "Stop" : "Play", nullptr, m_ScenePlaying))
                 {
                     m_ScenePlaying = !m_ScenePlaying;
                     if (m_ScenePlaying)
                     {
+                        LuaScriptEngine::ResetGameState();
                         PhysicsSystem::OnSceneStart(m_Scene.get(), m_PhysicsWorld.get());
                         AudioSystem::OnSceneStart(m_Scene.get());
                         AnimationSystem::OnSceneStart(m_Scene.get());
@@ -205,11 +282,25 @@ public:
                     }
                     else
                     {
+                        LuaScriptEngine::ResetGameState();
                         LuaScriptEngine::OnSceneStop(m_Scene.get());
                         AnimationSystem::OnSceneStop(m_Scene.get());
                         AudioSystem::OnSceneStop(m_Scene.get());
                         ParticleSystem::OnSceneStop(m_Scene.get());
                         PhysicsSystem::OnSceneStop(m_Scene.get());
+                    }
+                }
+                // Show Pause option while playing
+                if (m_ScenePlaying)
+                {
+                    auto gs = LuaScriptEngine::GetGameState();
+                    const char* pauseLabel = (gs == GameState::Paused) ? "Resume" : "Pause";
+                    if (ImGui::MenuItem(pauseLabel))
+                    {
+                        if (gs == GameState::Paused)
+                            LuaScriptEngine::SetGameState(GameState::Playing);
+                        else
+                            LuaScriptEngine::SetGameState(GameState::Paused);
                     }
                 }
                 ImGui::EndMenu();
@@ -220,6 +311,20 @@ public:
                 if (ImGui::MenuItem("Show Grid", nullptr, m_ShowGrid))
                 {
                     m_ShowGrid = !m_ShowGrid;
+                }
+                ImGui::EndMenu();
+            }
+
+            if (ImGui::BeginMenu("Help"))
+            {
+                if (ImGui::MenuItem("Getting Started"))
+                    m_ShowWelcome = true;
+                ImGui::Separator();
+                if (ImGui::MenuItem("Check for Updates"))
+                {
+                    m_UpdateToastDismissed = false;
+                    m_ShowUpdateModal = true;
+                    m_UpdateChecker.CheckAsync();
                 }
                 ImGui::EndMenu();
             }
@@ -235,6 +340,131 @@ public:
 
         // Viewport Panel
         DrawViewportPanel();
+
+        // Game state overlay (shown in viewport when playing and paused/won/lost)
+        if (m_ScenePlaying)
+        {
+            auto gs = LuaScriptEngine::GetGameState();
+            if (gs == GameState::Paused || gs == GameState::Won || gs == GameState::Lost)
+            {
+                ImGuiIO& gio = ImGui::GetIO();
+                ImGui::SetNextWindowPos(ImVec2(gio.DisplaySize.x * 0.5f, gio.DisplaySize.y * 0.5f),
+                    ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+                ImGui::SetNextWindowBgAlpha(0.88f);
+                ImGui::SetNextWindowSize(ImVec2(320, 0));
+                ImGui::Begin("##GameOverlay", nullptr,
+                    ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoDocking |
+                    ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoFocusOnAppearing |
+                    ImGuiWindowFlags_NoNav | ImGuiWindowFlags_NoMove |
+                    ImGuiWindowFlags_AlwaysAutoResize);
+
+                if (gs == GameState::Paused)
+                {
+                    ImGui::SetCursorPosX((ImGui::GetWindowWidth() - ImGui::CalcTextSize("PAUSED").x) * 0.5f);
+                    ImGui::TextColored(ImVec4(1, 1, 0, 1), "PAUSED");
+                    ImGui::Separator();
+                    ImGui::TextDisabled("Press P or Game > Resume to continue");
+                }
+                else if (gs == GameState::Won)
+                {
+                    ImGui::SetCursorPosX((ImGui::GetWindowWidth() - ImGui::CalcTextSize("YOU WIN!").x) * 0.5f);
+                    ImGui::TextColored(ImVec4(0.3f, 1, 0.3f, 1), "YOU WIN!");
+                    ImGui::Separator();
+                    if (ImGui::Button("Play Again", ImVec2(-1, 0)))
+                    {
+                        LuaScriptEngine::ResetGameState();
+                        LuaScriptEngine::OnSceneStop(m_Scene.get());
+                        LuaScriptEngine::OnSceneStart(m_Scene.get());
+                    }
+                }
+                else if (gs == GameState::Lost)
+                {
+                    ImGui::SetCursorPosX((ImGui::GetWindowWidth() - ImGui::CalcTextSize("GAME OVER").x) * 0.5f);
+                    ImGui::TextColored(ImVec4(1, 0.3f, 0.3f, 1), "GAME OVER");
+                    ImGui::Separator();
+                    if (ImGui::Button("Try Again", ImVec2(-1, 0)))
+                    {
+                        LuaScriptEngine::ResetGameState();
+                        LuaScriptEngine::OnSceneStop(m_Scene.get());
+                        LuaScriptEngine::OnSceneStart(m_Scene.get());
+                    }
+                }
+                ImGui::End();
+            }
+        }
+
+        // Update available toast (top-right corner, non-blocking)
+        if (m_UpdateChecker.IsUpdateAvailable() && !m_UpdateToastDismissed)
+        {
+            ImGuiIO& uio = ImGui::GetIO();
+            ImGui::SetNextWindowPos(
+                ImVec2(uio.DisplaySize.x - 10.0f, 30.0f),
+                ImGuiCond_Always, ImVec2(1.0f, 0.0f));
+            ImGui::SetNextWindowBgAlpha(0.9f);
+            ImGui::Begin("##UpdateToast", nullptr,
+                ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoDocking |
+                ImGuiWindowFlags_AlwaysAutoResize | ImGuiWindowFlags_NoSavedSettings |
+                ImGuiWindowFlags_NoFocusOnAppearing | ImGuiWindowFlags_NoNav |
+                ImGuiWindowFlags_NoMove);
+            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.0f, 1.0f),
+                "Update available: v%s", m_UpdateChecker.GetLatestVersion().c_str());
+            ImGui::SameLine();
+            if (ImGui::SmallButton("Download"))
+                m_UpdateChecker.OpenReleasePage();
+            ImGui::SameLine();
+            if (ImGui::SmallButton("X"))
+                m_UpdateToastDismissed = true;
+            ImGui::End();
+        }
+
+        // Update check result modal (triggered by Help -> Check for Updates)
+        if (m_ShowUpdateModal)
+        {
+            ImGui::OpenPopup("Check for Updates");
+            m_ShowUpdateModal = false;
+        }
+        if (ImGui::BeginPopupModal("Check for Updates", nullptr,
+                                   ImGuiWindowFlags_AlwaysAutoResize))
+        {
+            auto st = m_UpdateChecker.GetState();
+            if (st == UpdateChecker::State::Checking)
+            {
+                ImGui::Text("Checking for updates...");
+                // Keep modal open: re-queue OpenPopup next frame
+                m_ShowUpdateModal = true;
+            }
+            else if (st == UpdateChecker::State::UpdateAvailable)
+            {
+                ImGui::Text("Update available: v%s",
+                    m_UpdateChecker.GetLatestVersion().c_str());
+                ImGui::Text("You have v" ENGINE_VERSION);
+                if (ImGui::Button("Download"))
+                {
+                    m_UpdateChecker.OpenReleasePage();
+                    ImGui::CloseCurrentPopup();
+                }
+                ImGui::SameLine();
+                if (ImGui::Button("Later"))
+                    ImGui::CloseCurrentPopup();
+            }
+            else if (st == UpdateChecker::State::UpToDate)
+            {
+                ImGui::Text("You're up to date! (v" ENGINE_VERSION ")");
+                if (ImGui::Button("OK"))
+                    ImGui::CloseCurrentPopup();
+            }
+            else
+            {
+                ImGui::Text("Could not check for updates.");
+                ImGui::Text("Check your internet connection.");
+                if (ImGui::Button("OK"))
+                    ImGui::CloseCurrentPopup();
+            }
+            ImGui::EndPopup();
+        }
+
+        // Welcome screen
+        DrawWelcomeScreen();
 
         // Render ImGui
         ImGui::Render();
@@ -282,15 +512,98 @@ public:
         }
     }
 
+    void DrawWelcomeScreen()
+    {
+        if (!m_ShowWelcome) return;
+
+        ImVec2 center = ImGui::GetMainViewport()->GetCenter();
+        ImGui::SetNextWindowPos(center, ImGuiCond_Always, ImVec2(0.5f, 0.5f));
+        ImGui::SetNextWindowSize(ImVec2(580, 0), ImGuiCond_Always);
+        ImGui::OpenPopup("##welcome");
+
+        if (ImGui::BeginPopupModal("##welcome", nullptr,
+            ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize | ImGuiWindowFlags_NoMove))
+        {
+            // Title
+            ImGui::Spacing();
+            ImGui::SetCursorPosX((ImGui::GetWindowWidth() - ImGui::CalcTextSize("Kirkiana Games Studio").x) * 0.5f);
+            ImGui::TextColored(ImVec4(0.4f, 0.8f, 1.0f, 1.0f), "Kirkiana Games Studio");
+            ImGui::SetCursorPosX((ImGui::GetWindowWidth() -
+                ImGui::CalcTextSize("Create games, stories, and interactive experiences").x) * 0.5f);
+            ImGui::TextDisabled("Create games, stories, and interactive experiences");
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            // 3-step guide
+            ImGui::TextColored(ImVec4(1.0f, 0.85f, 0.3f, 1.0f), "Getting started in 3 steps:");
+            ImGui::Spacing();
+
+            ImGui::BulletText("Step 1 — Create an object");
+            ImGui::Indent();
+            ImGui::TextDisabled("Click '+ New Object' in the Objects panel (left side)");
+            ImGui::Unindent();
+            ImGui::Spacing();
+
+            ImGui::BulletText("Step 2 — Give it abilities");
+            ImGui::Indent();
+            ImGui::TextDisabled("Select it, then click 'Add Component' in the Properties panel (right side)");
+            ImGui::TextDisabled("e.g. add Appearance to make it visible, or Sound to give it audio");
+            ImGui::Unindent();
+            ImGui::Spacing();
+
+            ImGui::BulletText("Step 3 — Test your creation");
+            ImGui::Indent();
+            ImGui::TextDisabled("Click Game > Play to run your scene. Press it again to stop.");
+            ImGui::Unindent();
+            ImGui::Spacing();
+
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            // Tips
+            ImGui::TextColored(ImVec4(0.5f, 1.0f, 0.5f, 1.0f), "Useful tips:");
+            ImGui::BulletText("Right-click an object in the Objects panel to duplicate or delete it");
+            ImGui::BulletText("Scroll to zoom, middle-click drag to pan in the Scene View");
+            ImGui::BulletText("Use the AI Helper in a Behaviour (Script) component to write code for you");
+            ImGui::Spacing();
+            ImGui::Separator();
+            ImGui::Spacing();
+
+            // Footer
+            float btnWidth = 140.0f;
+            ImGui::SetCursorPosX((ImGui::GetWindowWidth() - btnWidth) * 0.5f);
+            if (ImGui::Button("Get Started!", ImVec2(btnWidth, 32)))
+            {
+                m_ShowWelcome = false;
+                ImGui::CloseCurrentPopup();
+            }
+
+            ImGui::Spacing();
+            bool showAgain = m_ShowWelcome;
+            if (ImGui::Checkbox("Show this screen next time I open the editor", &showAgain))
+                m_ShowWelcome = showAgain;
+            ImGui::Spacing();
+
+            ImGui::EndPopup();
+        }
+    }
+
     void DrawHierarchyPanel()
     {
-        ImGui::Begin("Hierarchy");
+        ImGui::Begin("Objects");
 
         // Toolbar
-        if (ImGui::Button("+ Entity"))
-            m_SelectedEntity = m_Scene->CreateEntity("New Entity");
+        if (ImGui::Button("+ New Object"))
+        {
+            m_SelectedEntity = m_Scene->CreateEntity("New Object");
+            // Place the new object at the centre of the editor camera view
+            auto& tf = m_SelectedEntity.GetComponent<TransformComponent>();
+            auto camPos = m_EditorCamera->GetPosition();
+            tf.Position = glm::vec3(camPos.x, camPos.y, 0.0f);
+        }
         ImGui::SameLine();
-        if (ImGui::Button("- Delete") && m_SelectedEntity)
+        if (ImGui::Button("Delete Object") && m_SelectedEntity)
         {
             m_Scene->DestroyEntity(m_SelectedEntity);
             m_SelectedEntity = {};
@@ -321,9 +634,9 @@ public:
             if (ImGui::BeginPopupContextItem())
             {
                 m_SelectedEntity = e;
-                if (ImGui::MenuItem("Delete Entity"))
+                if (ImGui::MenuItem("Delete Object"))
                     entityToDelete = e;
-                if (ImGui::MenuItem("Duplicate Entity"))
+                if (ImGui::MenuItem("Duplicate Object"))
                 {
                     // Simple duplicate: create a new entity with the same name
                     m_SelectedEntity = m_Scene->CreateEntity(tag.Tag + " (copy)");
@@ -348,7 +661,7 @@ public:
 
     void DrawInspectorPanel()
     {
-        ImGui::Begin("Inspector");
+        ImGui::Begin("Properties");
 
         if (m_SelectedEntity)
         {
@@ -372,7 +685,8 @@ public:
                 if (ImGui::CollapsingHeader("Transform", ImGuiTreeNodeFlags_DefaultOpen))
                 {
                     auto& transform = m_SelectedEntity.GetComponent<TransformComponent>();
-                    ImGui::DragFloat3("Position", &transform.Position.x, 0.1f);
+                    ImGui::DragFloat3("Start Position", &transform.Position.x, 0.1f);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Where this object appears when the game starts.");
                     ImGui::DragFloat3("Rotation", &transform.Rotation.x, 0.1f);
                     ImGui::DragFloat3("Scale", &transform.Scale.x, 0.1f);
                 }
@@ -381,10 +695,41 @@ public:
             // Sprite Renderer
             if (m_SelectedEntity.HasComponent<SpriteRendererComponent>())
             {
-                if (ImGui::CollapsingHeader("Sprite Renderer", ImGuiTreeNodeFlags_DefaultOpen))
+                if (ImGui::CollapsingHeader("Appearance", ImGuiTreeNodeFlags_DefaultOpen))
                 {
                     auto& sprite = m_SelectedEntity.GetComponent<SpriteRendererComponent>();
                     ImGui::ColorEdit4("Color", &sprite.Color.r);
+
+                    // Texture / image picker
+                    static char texBuf[256] = "";
+                    std::string currentPath = sprite.Texture ? sprite.Texture->GetPath() : "";
+                    if (currentPath.size() < sizeof(texBuf))
+                        std::copy(currentPath.begin(), currentPath.end(), texBuf),
+                        texBuf[currentPath.size()] = '\0';
+
+                    ImGui::SetNextItemWidth(-80.0f);
+                    if (ImGui::InputText("##texpath", texBuf, sizeof(texBuf)))
+                    {
+                        // live-update as user types a valid file
+                        if (std::filesystem::exists(texBuf))
+                            sprite.Texture = Engine::Texture2D::Create(texBuf);
+                        else
+                            sprite.Texture = nullptr;
+                    }
+                    ImGui::SameLine();
+                    if (ImGui::Button("Load Image"))
+                    {
+                        std::string p(texBuf);
+                        if (!p.empty() && std::filesystem::exists(p))
+                            sprite.Texture = Engine::Texture2D::Create(p);
+                        else if (p.empty())
+                            sprite.Texture = nullptr;
+                    }
+                    ImGui::SameLine();
+                    ImGui::TextDisabled("(?)");
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Type a path to a .png or .jpg file, then click Load Image.\nExample: assets/images/player.png");
+                    ImGui::TextDisabled("Image file (leave empty for solid color)");
                 }
             }
 
@@ -395,41 +740,45 @@ public:
                 {
                     auto& camera = m_SelectedEntity.GetComponent<CameraComponent>();
                     ImGui::Checkbox("Primary", &camera.Primary);
-                    ImGui::DragFloat("Orthographic Size", &camera.OrthographicSize, 0.1f);
+                    ImGui::DragFloat("Camera Zoom", &camera.OrthographicSize, 0.1f);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("How much of the scene is visible. Larger = zoomed out, smaller = zoomed in.");
                 }
             }
 
             // Rigidbody
             if (m_SelectedEntity.HasComponent<RigidbodyComponent>())
             {
-                if (ImGui::CollapsingHeader("Rigidbody", ImGuiTreeNodeFlags_DefaultOpen))
+                if (ImGui::CollapsingHeader("Physics Body", ImGuiTreeNodeFlags_DefaultOpen))
                 {
                     auto& rb = m_SelectedEntity.GetComponent<RigidbodyComponent>();
 
-                    const char* bodyTypes[] = { "Static", "Kinematic", "Dynamic" };
+                    const char* bodyTypes[] = { "Fixed (doesn't move)", "Scripted (moves by code)", "Physics (gravity + forces)" };
                     int currentType = static_cast<int>(rb.Type);
                     if (ImGui::Combo("Type", &currentType, bodyTypes, 3))
                     {
                         rb.Type = static_cast<RigidbodyComponent::BodyType>(currentType);
                     }
 
-                    ImGui::Checkbox("Fixed Rotation", &rb.FixedRotation);
+                    ImGui::Checkbox("Lock Rotation", &rb.FixedRotation);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Stops the object from spinning when hit by physics");
                     ImGui::DragFloat("Mass", &rb.Mass, 0.01f);
-                    ImGui::DragFloat("Gravity Scale", &rb.GravityScale, 0.01f);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("How heavy the object is. Heavier objects are harder to push.");
+                    ImGui::DragFloat("Gravity Strength", &rb.GravityScale, 0.01f);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("How much gravity affects this object. 0 = floats, 1 = normal, 2 = heavy");
                 }
             }
 
             // Script
             if (m_SelectedEntity.HasComponent<ScriptComponent>())
             {
-                if (ImGui::CollapsingHeader("Script", ImGuiTreeNodeFlags_DefaultOpen))
+                if (ImGui::CollapsingHeader("Behaviour (Script)", ImGuiTreeNodeFlags_DefaultOpen))
                 {
                     auto& sc = m_SelectedEntity.GetComponent<ScriptComponent>();
 
                     char pathBuf[512];
                     strncpy(pathBuf, sc.ScriptPath.c_str(), sizeof(pathBuf) - 1);
                     pathBuf[sizeof(pathBuf) - 1] = '\0';
-                    if (ImGui::InputText("Script Path", pathBuf, sizeof(pathBuf)))
+                    if (ImGui::InputText("Script File", pathBuf, sizeof(pathBuf)))
                         sc.ScriptPath = pathBuf;
 
                     ImGui::Checkbox("Enabled", &sc.Enabled);
@@ -440,10 +789,10 @@ public:
                     if (ImGui::Button("Reload"))
                         LuaScriptEngine::ReloadScript(m_Scene.get(), m_SelectedEntity);
                     ImGui::SameLine();
-                    if (ImGui::Button("AI Helper..."))
+                    if (ImGui::Button("Generate with AI..."))
                         ImGui::OpenPopup("AI Script Generator");
 
-                    ImGui::TextDisabled("Scripts run when scene is playing (Scene > Play)");
+                    ImGui::TextDisabled("Behaviours only run when you press Play (Game > Play)");
 
                     // ---------------------------------------------------------
                     // AI Helper popup
@@ -512,6 +861,7 @@ public:
                                 if (!std::isalnum(c) && c != '_') c = '_';
                             std::string savePath = "assets/scripts/" + tag + ".lua";
 
+                            std::filesystem::create_directories("assets/scripts");
                             std::ofstream f(savePath);
                             if (f.is_open()) {
                                 f << m_AIGeneratedCode;
@@ -545,21 +895,22 @@ public:
             // Audio Source
             if (m_SelectedEntity.HasComponent<AudioSourceComponent>())
             {
-                if (ImGui::CollapsingHeader("Audio Source", ImGuiTreeNodeFlags_DefaultOpen))
+                if (ImGui::CollapsingHeader("Sound", ImGuiTreeNodeFlags_DefaultOpen))
                 {
                     auto& src = m_SelectedEntity.GetComponent<AudioSourceComponent>();
 
                     char clipBuf[512];
                     strncpy(clipBuf, src.ClipPath.c_str(), sizeof(clipBuf) - 1);
                     clipBuf[sizeof(clipBuf) - 1] = '\0';
-                    if (ImGui::InputText("Clip Path", clipBuf, sizeof(clipBuf)))
+                    if (ImGui::InputText("Sound File", clipBuf, sizeof(clipBuf)))
                         src.ClipPath = clipBuf;
 
                     ImGui::SliderFloat("Volume", &src.Volume, 0.0f, 1.0f);
                     ImGui::SliderFloat("Pitch",  &src.Pitch,  0.1f, 3.0f);
                     ImGui::Checkbox("Loop",         &src.Loop);
                     ImGui::Checkbox("Play On Start", &src.PlayOnStart);
-                    ImGui::Checkbox("Spatial (3D)",  &src.Spatial);
+                    ImGui::Checkbox("3D Sound",      &src.Spatial);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("Makes the sound get quieter as the listener moves away from this object.");
 
                     ImGui::Spacing();
                     if (ImGui::Button("Play"))  AudioSystem::Play(m_SelectedEntity);
@@ -567,41 +918,40 @@ public:
                     if (ImGui::Button("Pause")) AudioSystem::Pause(m_SelectedEntity);
                     ImGui::SameLine();
                     if (ImGui::Button("Stop"))  AudioSystem::Stop(m_SelectedEntity);
-                    ImGui::TextDisabled("Playback controls work during scene play.");
+                    ImGui::TextDisabled("Use these buttons to preview your sound.");
                 }
             }
 
             // Audio Listener
             if (m_SelectedEntity.HasComponent<AudioListenerComponent>())
             {
-                if (ImGui::CollapsingHeader("Audio Listener", ImGuiTreeNodeFlags_DefaultOpen))
+                if (ImGui::CollapsingHeader("Sound Listener", ImGuiTreeNodeFlags_DefaultOpen))
                 {
-                    ImGui::TextDisabled("This entity acts as the audio listener.");
-                    ImGui::TextDisabled("Position is taken from its Transform.");
+                    ImGui::TextDisabled("This object acts as the ears of the scene.");
+                    ImGui::TextDisabled("Place it on your main character or camera.");
                 }
             }
 
             // Sprite Animation
             if (m_SelectedEntity.HasComponent<SpriteAnimationComponent>())
             {
-                if (ImGui::CollapsingHeader("Sprite Animation", ImGuiTreeNodeFlags_DefaultOpen))
+                if (ImGui::CollapsingHeader("Animation", ImGuiTreeNodeFlags_DefaultOpen))
                 {
                     auto& anim = m_SelectedEntity.GetComponent<SpriteAnimationComponent>();
 
                     char baseBuf[512];
                     strncpy(baseBuf, anim.BasePath.c_str(), sizeof(baseBuf) - 1);
                     baseBuf[sizeof(baseBuf) - 1] = '\0';
-                    if (ImGui::InputText("Base Path", baseBuf, sizeof(baseBuf)))
+                    if (ImGui::InputText("Image Folder", baseBuf, sizeof(baseBuf)))
                         anim.BasePath = baseBuf;
 
                     ImGui::DragInt("Frame Count",  &anim.FrameCount, 1, 1, 256);
-                    ImGui::DragFloat("Frame Time (s)", &anim.FrameTime, 0.01f, 0.01f, 2.0f);
+                    ImGui::DragFloat("Speed (s/frame)", &anim.FrameTime, 0.01f, 0.01f, 2.0f);
                     ImGui::Checkbox("Loop",    &anim.Loop);
                     ImGui::Checkbox("Playing", &anim.Playing);
 
-                    ImGui::TextDisabled("Frames: %s_0.png … %s_%d.png",
+                    ImGui::TextDisabled("Images: %s_0.png to %s_%d.png",
                         anim.BasePath.c_str(), anim.BasePath.c_str(), anim.FrameCount - 1);
-                    ImGui::TextDisabled("Or set FramePaths explicitly in code.");
                     if (anim.Playing)
                         ImGui::Text("Current frame: %d / %d",
                                     anim.CurrentFrame, (int)anim.Frames.size() - 1);
@@ -611,19 +961,21 @@ public:
             // Particle Emitter
             if (m_SelectedEntity.HasComponent<ParticleEmitterComponent>())
             {
-                if (ImGui::CollapsingHeader("Particle Emitter", ImGuiTreeNodeFlags_DefaultOpen))
+                if (ImGui::CollapsingHeader("Particles", ImGuiTreeNodeFlags_DefaultOpen))
                 {
                     auto& e = m_SelectedEntity.GetComponent<ParticleEmitterComponent>();
 
-                    ImGui::DragFloat2("Velocity",          &e.Velocity.x,          0.1f);
-                    ImGui::DragFloat2("Velocity Variation",&e.VelocityVariation.x,  0.05f);
-                    ImGui::ColorEdit4("Color Begin",       &e.ColorBegin.r);
-                    ImGui::ColorEdit4("Color End",         &e.ColorEnd.r);
-                    ImGui::DragFloat("Size Begin",  &e.SizeBegin,     0.01f, 0.0f, 5.0f);
-                    ImGui::DragFloat("Size End",    &e.SizeEnd,       0.01f, 0.0f, 5.0f);
-                    ImGui::DragFloat("Life Time",   &e.LifeTime,      0.05f, 0.1f, 10.0f);
-                    ImGui::DragFloat("Emission Rate", &e.EmissionRate, 1.0f, 1.0f, 500.0f);
-                    ImGui::Checkbox("Emitting", &e.Emitting);
+                    ImGui::DragFloat2("Direction",         &e.Velocity.x,          0.1f);
+                    ImGui::DragFloat2("Direction Spread",  &e.VelocityVariation.x,  0.05f);
+                    ImGui::ColorEdit4("Start Color",       &e.ColorBegin.r);
+                    ImGui::ColorEdit4("End Color",         &e.ColorEnd.r);
+                    ImGui::DragFloat("Start Size",   &e.SizeBegin,     0.01f, 0.0f, 5.0f);
+                    ImGui::DragFloat("End Size",     &e.SizeEnd,       0.01f, 0.0f, 5.0f);
+                    ImGui::DragFloat("Lifetime",     &e.LifeTime,      0.05f, 0.1f, 10.0f);
+                    ImGui::DragFloat("Spawn Rate",   &e.EmissionRate,  1.0f, 1.0f, 500.0f);
+                    ImGui::Checkbox("Active on Play", &e.Emitting);
+                    if (ImGui::IsItemHovered())
+                        ImGui::SetTooltip("Tick to emit particles as soon as Play is pressed.\nUntick and use SetEmitting(true) in a script to trigger at a specific moment.");
                 }
             }
 
@@ -741,17 +1093,65 @@ public:
                 }
             }
 
+            // Timer
+            if (m_SelectedEntity.HasComponent<TimerComponent>())
+            {
+                if (ImGui::CollapsingHeader("Timer", ImGuiTreeNodeFlags_DefaultOpen))
+                {
+                    auto& t = m_SelectedEntity.GetComponent<TimerComponent>();
+                    ImGui::DragFloat("Duration (s)", &t.Duration, 0.5f, 0.0f, 3600.0f);
+                    ImGui::Checkbox("Count Down", &t.CountDown);
+                    ImGui::Checkbox("Loop", &t.Loop);
+                    ImGui::Checkbox("Active", &t.Active);
+                    ImGui::Text("Elapsed : %.2f s", t.Elapsed);
+                    if (t.CountDown && t.Duration > 0.0f)
+                        ImGui::Text("Remaining: %.2f s", t.GetRemaining());
+                    if (t.Expired)
+                        ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "EXPIRED");
+                    if (ImGui::Button("Reset Timer"))
+                    {
+                        t.Elapsed  = 0.0f;
+                        t.Expired  = false;
+                        t.Active   = true;
+                    }
+                }
+            }
+
+            // Video
+            if (m_SelectedEntity.HasComponent<VideoComponent>())
+            {
+                if (ImGui::CollapsingHeader("Video", ImGuiTreeNodeFlags_DefaultOpen))
+                {
+                    auto& vc = m_SelectedEntity.GetComponent<VideoComponent>();
+
+                    char urlBuf[512];
+                    strncpy(urlBuf, vc.VideoUrl.c_str(), sizeof(urlBuf) - 1);
+                    urlBuf[sizeof(urlBuf) - 1] = '\0';
+                    if (ImGui::InputText("Video URL", urlBuf, sizeof(urlBuf)))
+                        vc.VideoUrl = urlBuf;
+
+                    ImGui::Checkbox("Auto Play",   &vc.AutoPlay);
+                    ImGui::Checkbox("Loop##vc",    &vc.Loop);
+                    ImGui::Checkbox("Visible##vc", &vc.Visible);
+                    ImGui::TextDisabled("In the web player, an HTML5 video overlay is shown.");
+                    ImGui::TextDisabled("Use PlayVideo(url) in a Behaviour to trigger at any time.");
+                }
+            }
+
             // Circle Collider
             if (m_SelectedEntity.HasComponent<CircleColliderComponent>())
             {
-                if (ImGui::CollapsingHeader("Circle Collider", ImGuiTreeNodeFlags_DefaultOpen))
+                if (ImGui::CollapsingHeader("Circle Hitbox", ImGuiTreeNodeFlags_DefaultOpen))
                 {
                     auto& cc = m_SelectedEntity.GetComponent<CircleColliderComponent>();
-                    ImGui::DragFloat("Radius",      &cc.Radius,      0.01f, 0.01f, 10.0f);
-                    ImGui::DragFloat2("Offset##cc", &cc.Offset.x,    0.01f);
-                    ImGui::DragFloat("Density##cc", &cc.Density,     0.01f);
-                    ImGui::DragFloat("Friction##cc",&cc.Friction,    0.01f);
-                    ImGui::DragFloat("Restitution##cc",&cc.Restitution,0.01f);
+                    ImGui::DragFloat("Radius",        &cc.Radius,      0.01f, 0.01f, 10.0f);
+                    ImGui::DragFloat2("Offset##cc",   &cc.Offset.x,    0.01f);
+                    ImGui::DragFloat("Density##cc",   &cc.Density,     0.01f);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("How heavy the material feels. Higher = heavier per unit area.");
+                    ImGui::DragFloat("Friction##cc",  &cc.Friction,    0.01f);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("How much objects slide. 0 = ice (slippery), 1 = rubber (grippy).");
+                    ImGui::DragFloat("Bounciness##cc",&cc.Restitution,  0.01f);
+                    if (ImGui::IsItemHovered()) ImGui::SetTooltip("How much this object bounces. 0 = no bounce, 1 = bounces forever.");
                 }
             }
 
@@ -767,7 +1167,7 @@ public:
             {
                 if (!m_SelectedEntity.HasComponent<SpriteRendererComponent>())
                 {
-                    if (ImGui::MenuItem("Sprite Renderer"))
+                    if (ImGui::MenuItem("Appearance (Color / Sprite)"))
                     {
                         m_SelectedEntity.AddComponent<SpriteRendererComponent>();
                         ImGui::CloseCurrentPopup();
@@ -785,7 +1185,7 @@ public:
 
                 if (!m_SelectedEntity.HasComponent<RigidbodyComponent>())
                 {
-                    if (ImGui::MenuItem("Rigidbody"))
+                    if (ImGui::MenuItem("Physics Body (gravity, forces)"))
                     {
                         m_SelectedEntity.AddComponent<RigidbodyComponent>();
                         ImGui::CloseCurrentPopup();
@@ -794,7 +1194,7 @@ public:
 
                 if (!m_SelectedEntity.HasComponent<BoxColliderComponent>())
                 {
-                    if (ImGui::MenuItem("Box Collider"))
+                    if (ImGui::MenuItem("Box Hitbox (rectangle collision)"))
                     {
                         m_SelectedEntity.AddComponent<BoxColliderComponent>();
                         ImGui::CloseCurrentPopup();
@@ -803,7 +1203,7 @@ public:
 
                 if (!m_SelectedEntity.HasComponent<CircleColliderComponent>())
                 {
-                    if (ImGui::MenuItem("Circle Collider"))
+                    if (ImGui::MenuItem("Circle Hitbox (round collision)"))
                     {
                         m_SelectedEntity.AddComponent<CircleColliderComponent>();
                         ImGui::CloseCurrentPopup();
@@ -812,7 +1212,7 @@ public:
 
                 if (!m_SelectedEntity.HasComponent<ScriptComponent>())
                 {
-                    if (ImGui::MenuItem("Script"))
+                    if (ImGui::MenuItem("Behaviour (Script / AI)"))
                     {
                         m_SelectedEntity.AddComponent<ScriptComponent>();
                         ImGui::CloseCurrentPopup();
@@ -821,7 +1221,7 @@ public:
 
                 if (!m_SelectedEntity.HasComponent<AudioSourceComponent>())
                 {
-                    if (ImGui::MenuItem("Audio Source"))
+                    if (ImGui::MenuItem("Sound (plays audio)"))
                     {
                         m_SelectedEntity.AddComponent<AudioSourceComponent>();
                         ImGui::CloseCurrentPopup();
@@ -830,7 +1230,7 @@ public:
 
                 if (!m_SelectedEntity.HasComponent<AudioListenerComponent>())
                 {
-                    if (ImGui::MenuItem("Audio Listener"))
+                    if (ImGui::MenuItem("Sound Listener (ears of the scene)"))
                     {
                         m_SelectedEntity.AddComponent<AudioListenerComponent>();
                         ImGui::CloseCurrentPopup();
@@ -839,7 +1239,7 @@ public:
 
                 if (!m_SelectedEntity.HasComponent<SpriteAnimationComponent>())
                 {
-                    if (ImGui::MenuItem("Sprite Animation"))
+                    if (ImGui::MenuItem("Animation (flipbook frames)"))
                     {
                         m_SelectedEntity.AddComponent<SpriteAnimationComponent>();
                         ImGui::CloseCurrentPopup();
@@ -848,9 +1248,27 @@ public:
 
                 if (!m_SelectedEntity.HasComponent<ParticleEmitterComponent>())
                 {
-                    if (ImGui::MenuItem("Particle Emitter"))
+                    if (ImGui::MenuItem("Particles (sparks, fire, dust...)"))
                     {
                         m_SelectedEntity.AddComponent<ParticleEmitterComponent>();
+                        ImGui::CloseCurrentPopup();
+                    }
+                }
+
+                if (!m_SelectedEntity.HasComponent<TimerComponent>())
+                {
+                    if (ImGui::MenuItem("Timer (countdown / stopwatch)"))
+                    {
+                        m_SelectedEntity.AddComponent<TimerComponent>();
+                        ImGui::CloseCurrentPopup();
+                    }
+                }
+
+                if (!m_SelectedEntity.HasComponent<VideoComponent>())
+                {
+                    if (ImGui::MenuItem("Video (web HTML5 video overlay)"))
+                    {
+                        m_SelectedEntity.AddComponent<VideoComponent>();
                         ImGui::CloseCurrentPopup();
                     }
                 }
@@ -890,7 +1308,8 @@ public:
         }
         else
         {
-            ImGui::Text("No entity selected");
+            ImGui::TextDisabled("No object selected.");
+            ImGui::TextDisabled("Click an object in the Objects panel to see its properties.");
         }
 
         ImGui::End();
@@ -1089,6 +1508,14 @@ private:
     std::string m_AIGeneratedCode;
     std::string m_AIStatusMsg;
     bool        m_AIGenerating        = false;
+
+    // Update checker
+    UpdateChecker m_UpdateChecker;
+    bool          m_ShowUpdateModal      = false;
+    bool          m_UpdateToastDismissed = false;
+
+    // Welcome screen
+    bool m_ShowWelcome = true;
 
     // Profiler ring buffer (last 120 frame times)
     static constexpr int k_ProfilerSamples = 120;

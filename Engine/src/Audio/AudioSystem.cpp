@@ -4,14 +4,30 @@
 #include "Engine/ECS/Entity.h"
 #include "Engine/Scene/Scene.h"
 
+#ifndef __EMSCRIPTEN__
 #include <AL/al.h>
 #include <sndfile.h>
-
 #include <iostream>
 #include <string>
 #include <vector>
+#endif
 
 namespace Engine {
+
+#ifdef __EMSCRIPTEN__
+// Audio is silent on WebAssembly builds (libsndfile/OpenAL not available)
+unsigned int AudioSystem::LoadBuffer(const std::string&) { return 0; }
+void         AudioSystem::FreeSource(Entity)             {}
+void         AudioSystem::OnSceneStart(Scene*)           {}
+void         AudioSystem::OnSceneStop(Scene*)            {}
+void         AudioSystem::OnUpdate(Scene*)               {}
+void         AudioSystem::Play(Entity)                   {}
+void         AudioSystem::Stop(Entity)                   {}
+void         AudioSystem::Pause(Entity)                  {}
+void         AudioSystem::SetVolume(Entity, float)       {}
+float        AudioSystem::GetVolume(Entity)              { return 0.0f; }
+
+#else
 
 // -----------------------------------------------------------------------
 // Private: load an audio file into an OpenAL buffer
@@ -222,5 +238,7 @@ float AudioSystem::GetVolume(Entity entity)
         return 0.0f;
     return entity.GetComponent<AudioSourceComponent>().Volume;
 }
+
+#endif // __EMSCRIPTEN__
 
 } // namespace Engine

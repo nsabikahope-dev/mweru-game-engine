@@ -288,7 +288,7 @@ struct ParticleEmitterComponent
     float     SizeEnd           = 0.0f;
     float     LifeTime          = 1.5f;
     float     EmissionRate      = 20.0f; // particles per second
-    bool      Emitting          = true;
+    bool      Emitting          = false;
 
     // Runtime particle pool
     static constexpr int MaxParticles = 200;
@@ -364,6 +364,53 @@ struct DialogueComponent
 
     DialogueComponent() = default;
     DialogueComponent(const DialogueComponent&) = default;
+};
+
+/**
+ * @brief Game timer — counts up or down; fires OnTimerExpired() Lua callback.
+ */
+struct TimerComponent
+{
+    float Duration  = 60.0f; // seconds total; 0 = unlimited count-up
+    float Elapsed   = 0.0f;
+    bool  Active    = true;
+    bool  CountDown = true;  // false → count up
+    bool  Expired   = false;
+    bool  Loop      = false; // restart automatically when expired
+
+    float GetRemaining() const { return Duration > 0.0f ? std::max(0.0f, Duration - Elapsed) : 0.0f; }
+    float GetDisplayTime() const { return CountDown ? GetRemaining() : Elapsed; }
+
+    TimerComponent() = default;
+    TimerComponent(const TimerComponent&) = default;
+};
+
+/**
+ * @brief Video playback component.
+ *
+ * In the web runtime this plays an HTML5 <video> element overlaid on the
+ * canvas. Set AutoPlay = true to start immediately when the scene begins, or
+ * call PlayVideo(url) from a Lua script to start at a specific moment.
+ *
+ * Lua API (bound to the entity that owns this component):
+ *   PlayVideo(url)       — load and start a video URL
+ *   PauseVideo()         — pause playback
+ *   StopVideo()          — stop and hide video
+ *   IsVideoPlaying()     — bool
+ *   SetVideoLoop(bool)   — toggle looping
+ *
+ * On desktop the calls are no-ops (console log only); video is a web feature.
+ */
+struct VideoComponent
+{
+    std::string VideoUrl;
+    bool        Loop     = false;
+    bool        AutoPlay = false;
+    bool        Visible  = true;
+
+    VideoComponent() = default;
+    VideoComponent(const VideoComponent&) = default;
+    VideoComponent(const std::string& url) : VideoUrl(url) {}
 };
 
 /**
